@@ -1,0 +1,869 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PICO4 WebXR Arcade Shooter - Static Test Scene</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+    #renderCanvas { width: 100%; height: 100%; touch-action: none; display: block; }
+
+    /* ---- 全屏调试层：始终在最前，VR里可见 ---- */
+    #debugLog {
+      position: fixed; top: 0; left: 0; width: 100%; min-height: 52px;
+      background: rgba(0,0,0,0.94); color: #88ffcc;
+      font-family: 'Courier New', monospace; font-size: 0.78rem;
+      padding: 6px 12px; z-index: 9999; max-height: 120px; overflow-y: auto;
+      border-bottom: 1px solid #00ffcc; line-height: 1.7; display: block;
+    }
+    #statusBar {
+      position: fixed; bottom: 0; left: 0; width: 100%;
+      text-align: center; font-size: 1rem; color: #88ffcc;
+      font-family: 'Courier New', monospace; z-index: 9998;
+      pointer-events: none; letter-spacing: 1px;
+      text-shadow: 0 0 12px #00ffcc;
+      background: rgba(0,0,0,0.7); padding: 10px 0;
+      border-top: 1px solid rgba(0,255,204,0.3);
+    }
+    #diagOverlay {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(0,0,0,0.90); z-index: 9997;
+      display: none; flex-direction: column;
+      align-items: center; justify-content: center;
+      font-family: 'Courier New', monospace; color: #88ffcc;
+    }
+    #diagOverlay.show { display: flex; }
+    #diagMsg {
+      font-size: 1.1rem; text-align: center; padding: 24px 32px;
+      background: rgba(0,20,15,0.9); border: 2px solid #00ffcc;
+      max-width: 600px; white-space: pre-wrap; line-height: 1.7;
+    }
+    #diagOverlay small { margin-top: 16px; font-size: 0.75rem; color: #555; }
+
+    /* ---- 主界面遮罩 ---- */
+    #overlay {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.75);
+      font-family: 'Courier New', monospace; color: #00ffcc;
+      z-index: 100; pointer-events: all;
+    }
+    #overlay h1 { font-size: 2rem; letter-spacing: 4px; text-shadow: 0 0 20px #00ffcc; margin-bottom: 8px; }
+    #overlay h2 { font-size: 1rem; color: #88ffdd; letter-spacing: 2px; margin-bottom: 24px; }
+    #overlay p  { font-size: 0.85rem; color: #aaa; margin: 4px 0; text-align: center; max-width: 600px; line-height: 1.6; }
+    #overlay .warn { color: #ffaa00; font-size: 0.8rem; margin-top: 16px; }
+
+    #startBtn {
+      margin-top: 24px; padding: 12px 36px;
+      background: transparent; border: 2px solid #00ffcc;
+      color: #00ffcc; font-family: 'Courier New', monospace; font-size: 1rem;
+      letter-spacing: 3px; cursor: pointer;
+      box-shadow: 0 0 15px rgba(0,255,204,0.3);
+      transition: all 0.2s;
+    }
+    #startBtn:hover { background: rgba(0,255,204,0.15); box-shadow: 0 0 25px rgba(0,255,204,0.6); }
+    #startBtn:disabled { opacity: 0.4; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+<canvas id="renderCanvas"></canvas>
+
+<!-- 全屏调试层：始终在最前，VR里可见 -->
+<div id="debugLog"></div>
+<div id="statusBar">初始化中...</div>
+<div id="diagOverlay">
+  <div id="diagMsg"></div>
+  <small>点击任意处关闭</small>
+</div>
+
+<!-- 主界面遮罩 -->
+<div id="overlay">
+  <h1>ARCADE SHOOTER</h1>
+  <h2>WebXR Static Test Scene &middot; Babylon.js 7.x + Cannon.js</h2>
+  <p>PICO4 VR 射击游戏静态测试场景</p>
+  <p>平台 &middot; 4根发光巨柱 &middot; 云海天空 &middot; 机械手套 + 枪械 &middot; 手腕 UI</p>
+  <p class="warn">&#9651; 请使用 HTTPS 或 localhost 访问本页面以启用 WebXR</p>
+  <button id="startBtn">ENTER VR</button>
+</div>
+
+<!-- Babylon.js Core -->
+<script src="https://cdn.babylonjs.com/babylon.js"></script>
+<!-- Babylon.js Loaders -->
+<script src="https://cdn.babylonjs.com/loaders/babylonjs.loaders.min.js"></script>
+<!-- Babylon.js GUI -->
+<script src="https://cdn.babylonjs.com/gui/babylon.gui.min.js"></script>
+<!-- Cannon.js Physics -->
+<script src="https://cdn.babylonjs.com/cannon.js"></script>
+
+<script>
+'use strict';
+
+// ================================================================
+// 全局错误捕获
+// ================================================================
+window.addEventListener('error', (e) => {
+  const msg = '[JS ERROR] ' + (e.message || '') + ' @ ' + (e.filename||'').split('/').pop() + ':' + (e.lineno||'');
+  showDiag('[JS ERROR]\n' + msg);
+});
+window.addEventListener('unhandledrejection', (e) => {
+  showDiag('[UNHANDLED]\n' + String(e.reason));
+});
+
+// ================================================================
+// 调试日志系统
+// ================================================================
+function addLog(msg) {
+  var d = document.getElementById('debugLog');
+  if (d) {
+    var t = new Date().toLocaleTimeString();
+    var div = document.createElement('div');
+    div.textContent = '[' + t + '] ' + msg;
+    d.insertBefore(div, d.firstChild);
+    if (d.innerHTML.length > 3000) d.innerHTML = d.innerHTML.substring(0, 3000);
+  }
+}
+function setStatus(msg) {
+  var el = document.getElementById('statusBar');
+  if (el) el.textContent = msg;
+  addLog(msg);
+  console.log('[STATUS]', msg);
+}
+function showDiag(msg) {
+  var ds = document.getElementById('diagMsg');
+  var dv = document.getElementById('diagOverlay');
+  if (ds && dv) { ds.textContent = msg; dv.className = 'show'; }
+  console.error('[DIAG]', msg);
+}
+window.showDiag = showDiag; // 全局暴露
+
+// 点击关闭诊断弹窗
+document.getElementById('diagOverlay').addEventListener('click', function() {
+  this.className = '';
+});
+
+// ================================================================
+// 音效接口 (SFX Hook)
+// ================================================================
+function playSFX(eventName) {
+  // TODO: Implement SFX playback
+}
+
+// ================================================================
+// 震动接口
+// ================================================================
+function vibrateController(hand, intensity, duration) {
+  // TODO: Implement haptic feedback via XRController.gamepad hapticActuators
+}
+
+// ================================================================
+// 场景状态枚举
+// ================================================================
+var SCENE_STATE = {
+  IDLE:       'IDLE',
+  STATIC_DEMO:'STATIC_DEMO',
+  GAMEPLAY:   'GAMEPLAY',
+};
+
+// ================================================================
+// Helpers
+// ================================================================
+function hexToColor3(hex) {
+  var r = parseInt(hex.slice(1,3), 16) / 255;
+  var g = parseInt(hex.slice(3,5), 16) / 255;
+  var b = parseInt(hex.slice(5,7), 16) / 255;
+  return new BABYLON.Color3(r, g, b);
+}
+
+// 程序化 TRON 网格纹理
+function createTronGridTexture(scene) {
+  var size = 512;
+  var canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  var ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#0d0d0d';
+  ctx.fillRect(0, 0, size, size);
+  ctx.strokeStyle = '#00ffcc';
+  ctx.lineWidth = 1;
+  ctx.globalAlpha = 0.6;
+  var step = size / 8;
+  for (var i = 0; i <= size; i += step) {
+    ctx.beginPath(); ctx.moveTo(i,0); ctx.lineTo(i,size); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0,i); ctx.lineTo(size,i); ctx.stroke();
+  }
+  var grad = ctx.createRadialGradient(size/2,size/2,0,size/2,size/2,size/2);
+  grad.addColorStop(0,   'rgba(0,255,204,0.08)');
+  grad.addColorStop(0.5, 'rgba(0,200,160,0.04)');
+  grad.addColorStop(1,   'rgba(0,0,0,0)');
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = grad;
+  ctx.fillRect(0,0,size,size);
+  var tex = new BABYLON.DynamicTexture('tronGridTex', {width:size, height:size}, scene, false);
+  tex.getContext().drawImage(canvas,0,0);
+  tex.update();
+  return tex;
+}
+
+// 程序化云海纹理
+function createCloudTexture(scene) {
+  var W=1024, H=512;
+  var canvas = document.createElement('canvas');
+  canvas.width=W; canvas.height=H;
+  var ctx = canvas.getContext('2d');
+  var bg = ctx.createLinearGradient(0,0,0,H);
+  bg.addColorStop(0,   '#8ec8f0');
+  bg.addColorStop(0.3, '#ddeeff');
+  bg.addColorStop(0.7, '#e8f4fc');
+  bg.addColorStop(1,   '#f5f9ff');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0,0,W,H);
+  ctx.globalAlpha = 0.45;
+  for (var i=0; i<60; i++) {
+    var x = Math.random()*W;
+    var y = H*0.25 + Math.random()*H*0.6;
+    var rx = 60+Math.random()*180;
+    var ry = 20+Math.random()*60;
+    var g = ctx.createRadialGradient(x,y,0,x,y,rx);
+    g.addColorStop(0,   'rgba(255,255,255,0.9)');
+    g.addColorStop(0.5, 'rgba(220,235,250,0.6)');
+    g.addColorStop(1,   'rgba(200,220,240,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.ellipse(x,y,rx,ry,0,0,Math.PI*2); ctx.fill();
+  }
+  var tex = new BABYLON.DynamicTexture('cloudTex',{width:W,height:H},scene,false);
+  tex.getContext().drawImage(canvas,0,0);
+  tex.update();
+  tex.uScale=2; tex.vScale=1;
+  return tex;
+}
+
+// 程序化柱子流动纹理
+function createPillarFlowTexture(scene, baseColor) {
+  var W=256, H=512;
+  var canvas = document.createElement('canvas');
+  canvas.width=W; canvas.height=H;
+  var ctx = canvas.getContext('2d');
+  ctx.fillStyle = baseColor;
+  ctx.fillRect(0,0,W,H);
+  var bands = 8;
+  for (var i=0; i<bands; i++) {
+    var x = (i/bands)*W + Math.random()*20;
+    var w = 2+Math.random()*4;
+    var grad = ctx.createLinearGradient(x,0,x,0);
+    grad.addColorStop(0,   'rgba(0,255,0,0)');
+    grad.addColorStop(0.5, 'rgba(0,255,0,0.35)');
+    grad.addColorStop(1,   'rgba(0,255,0,0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(x-w/2,0,w,H);
+  }
+  var tex = new BABYLON.DynamicTexture('pillarFlowTex',{width:W,height:H},scene,false);
+  tex.getContext().drawImage(canvas,0,0);
+  tex.update();
+  tex.wrapU = BABYLON.Texture.WRAP_ADDRESSMODE;
+  tex.wrapV = BABYLON.Texture.WRAP_ADDRESSMODE;
+  return tex;
+}
+
+// ================================================================
+// EnvironmentManager
+// ================================================================
+var EnvironmentManager = (function() {
+  function EnvironmentManager(scene) {
+    this.scene = scene;
+    this.pillars = [];
+    this.pillarMaterials = [];
+    this.flowTextures = [];
+    this.time = 0;
+    this._build();
+  }
+
+  EnvironmentManager.prototype._build = function() {
+    var scene = this.scene;
+    var platformRadius = 5.0;
+    var pillarAngles = [0, 90, 180, 270];
+
+    // 圆形平台
+    var platform = BABYLON.MeshBuilder.CreateCylinder('platform', {
+      diameter: platformRadius*2, height: 0.1, tessellation: 64,
+    }, scene);
+    platform.position.y = -0.05;
+    var platMat = new BABYLON.StandardMaterial('platMat', scene);
+    platMat.diffuseTexture = createTronGridTexture(scene);
+    platMat.specularColor  = new BABYLON.Color3(0.1,0.1,0.1);
+    platMat.emissiveColor  = new BABYLON.Color3(0.02,0.05,0.05);
+    platform.material = platMat;
+
+    // 平台边缘发光环
+    var ring = BABYLON.MeshBuilder.CreateTorus('platformRing', {
+      diameter: platformRadius*2, thickness: 0.06, tessellation: 64,
+    }, scene);
+    ring.position.y = 0.0;
+    var ringMat = new BABYLON.StandardMaterial('ringMat', scene);
+    ringMat.emissiveColor = hexToColor3('#00ffcc');
+    ringMat.disableLighting = true;
+    ring.material = ringMat;
+
+    // 4根巨柱
+    var self = this;
+    pillarAngles.forEach(function(deg, idx) {
+      var rad = (deg * Math.PI) / 180;
+      var cx  = Math.sin(rad) * 5;
+      var cz  = Math.cos(rad) * 5;
+      var pillar = BABYLON.MeshBuilder.CreateBox('pillar_' + idx, {
+        width: 0.3, height: 4.0, depth: 0.3,
+      }, scene);
+      pillar.position.set(cx, 2.0, cz);
+
+      // 顶部/底部光环
+      var makeRing = function(y, name) {
+        var r = BABYLON.MeshBuilder.CreateTorus(name, {
+          diameter: 0.42, thickness: 0.04, tessellation: 24,
+        }, scene);
+        r.position.set(cx, y, cz);
+        var rm = new BABYLON.StandardMaterial(name+'Mat', scene);
+        rm.emissiveColor = hexToColor3('#00ff00');
+        rm.disableLighting = true;
+        r.material = rm;
+        return r;
+      };
+      var botRing = makeRing(0.0, 'botRing_'+idx);
+      var topRing = makeRing(4.0, 'topRing_'+idx);
+
+      // 柱子材质
+      var pMat = new BABYLON.StandardMaterial('pMat_'+idx, scene);
+      var flowTex = createPillarFlowTexture(scene, '#0a1a0a');
+      flowTex.uOffset = idx * 0.25;
+      pMat.diffuseTexture  = flowTex;
+      pMat.specularColor   = new BABYLON.Color3(0.05,0.05,0.05);
+      pMat.emissiveTexture = flowTex;
+      pMat.emissiveColor   = new BABYLON.Color3(0.1, 0.5, 0.1);
+      pillar.material = pMat;
+
+      self.pillars.push({ pillar: pillar, botRing: botRing, topRing: topRing, flowTex: flowTex, mat: pMat });
+      self.pillarMaterials.push({ ring: ringMat, pMat: pMat, botRing: botRing, topRing: topRing });
+      self.flowTextures.push(flowTex);
+    });
+
+    // 云海天空球（外层穹顶）
+    var sky = BABYLON.MeshBuilder.CreateSphere('sky', {
+      diameter: 80, segments: 20, sideOrientation: BABYLON.Mesh.BACKSIDE,
+    }, scene);
+    sky.position.y = -38;
+
+    var skyMat = new BABYLON.StandardMaterial('skyMat', scene);
+    var cloudTex = createCloudTexture(scene);
+    skyMat.diffuseTexture  = cloudTex;
+    skyMat.emissiveTexture = cloudTex;
+    skyMat.emissiveColor   = new BABYLON.Color3(0.12, 0.14, 0.18);
+    skyMat.backFaceCulling = false;
+    skyMat.disableLighting = false;
+    skyMat.alpha = 0.88;
+    sky.material = skyMat;
+
+    // 底部云海
+    var cloudFloor = BABYLON.MeshBuilder.CreateCylinder('cloudFloor', {
+      diameterTop: 40, diameterBottom: 55, height: 14, tessellation: 40,
+    }, scene);
+    cloudFloor.position.y = -11;
+    var cfMat = new BABYLON.StandardMaterial('cfMat', scene);
+    var cfTex = createCloudTexture(scene);
+    cfTex.vScale = 3;
+    cfMat.diffuseTexture  = cfTex;
+    cfMat.emissiveTexture = cfTex;
+    cfMat.emissiveColor   = new BABYLON.Color3(0.08, 0.10, 0.14);
+    cfMat.alpha           = 0.72;
+    cfMat.backFaceCulling = false;
+    cloudFloor.material = cfMat;
+
+    // 光照
+    var ambient = new BABYLON.HemisphericLight('ambient', new BABYLON.Vector3(0,1,0), scene);
+    ambient.intensity  = 0.3;
+    ambient.diffuse    = new BABYLON.Color3(0.7,0.8,0.9);
+    ambient.groundColor = new BABYLON.Color3(0.1,0.15,0.2);
+
+    var sun = new BABYLON.DirectionalLight('sun', new BABYLON.Vector3(-0.5,-1,-0.5), scene);
+    sun.intensity = 0.6;
+    sun.diffuse   = new BABYLON.Color3(0.9,0.95,1.0);
+  };
+
+  EnvironmentManager.prototype.setPillarColor = function(colorHex, emissiveIntensity) {
+    var c = hexToColor3(colorHex);
+    var self = this;
+    this.pillarMaterials.forEach(function(pm) {
+      pm.pMat.emissiveColor = c.scale(emissiveIntensity * 0.3);
+      pm.botRing.material.emissiveColor = c;
+      pm.topRing.material.emissiveColor = c;
+      pm.ring.emissiveColor = c;
+    });
+  };
+
+  EnvironmentManager.prototype.update = function(deltaTime) {
+    this.time += deltaTime;
+    var self = this;
+    this.pillars.forEach(function(p) {
+      p.flowTex.vOffset = (self.time * 0.08) % 1;
+    });
+  };
+
+  return EnvironmentManager;
+})();
+
+// ================================================================
+// PlayerManager
+// ================================================================
+var PlayerManager = (function() {
+  function PlayerManager(scene, xrHelper) {
+    this.scene = scene;
+    this.xrHelper = xrHelper;
+    this.rightHand = null;
+    this.leftHand  = null;
+    this.gun       = null;
+    this.gunTip    = null;
+    this._build();
+  }
+
+  PlayerManager.prototype._build = function() {
+    var scene = this.scene;
+    var self = this;
+
+    // 几何手套工厂
+    var makeGlove = function(name) {
+      var root = new BABYLON.TransformNode(name, scene);
+      var gloveMat = new BABYLON.StandardMaterial(name+'_mat', scene);
+      gloveMat.diffuseColor  = new BABYLON.Color3(0.25, 0.25, 0.28);
+      gloveMat.specularColor = new BABYLON.Color3(0.4, 0.4, 0.4);
+      gloveMat.specularPower = 32;
+
+      var palm = BABYLON.MeshBuilder.CreateBox(name+'_palm', {width:0.07,height:0.04,depth:0.09}, scene);
+      palm.material = gloveMat; palm.parent = root;
+
+      var fingerOffsets = [-0.028, -0.009, 0.009, 0.028];
+      fingerOffsets.forEach(function(ox, fi) {
+        var seg1 = BABYLON.MeshBuilder.CreateBox(name+'_f'+fi, {width:0.018,height:0.038,depth:0.018}, scene);
+        seg1.position.set(ox, -0.04, 0.0); seg1.material = gloveMat; seg1.parent = root;
+        var seg2 = BABYLON.MeshBuilder.CreateBox(name+'_ft'+fi, {width:0.015,height:0.03,depth:0.015}, scene);
+        seg2.position.set(ox, -0.075, 0.0); seg2.material = gloveMat; seg2.parent = root;
+      });
+      var thumb = BABYLON.MeshBuilder.CreateBox(name+'_thumb',{width:0.02,height:0.03,depth:0.015}, scene);
+      thumb.position.set(0.045, -0.015, 0.02); thumb.rotation.z = -0.5;
+      thumb.material = gloveMat; thumb.parent = root;
+      return root;
+    };
+
+    // 枪械工厂
+    var makeGun = function() {
+      var gunRoot = new BABYLON.TransformNode('gunRoot', scene);
+      var metalMat = new BABYLON.StandardMaterial('gunMetalMat', scene);
+      metalMat.diffuseColor  = new BABYLON.Color3(0.15, 0.15, 0.18);
+      metalMat.specularColor = new BABYLON.Color3(0.6, 0.6, 0.6);
+      metalMat.specularPower = 64;
+
+      var body = BABYLON.MeshBuilder.CreateBox('gunBody',{width:0.04,height:0.06,depth:0.22}, scene);
+      body.position.set(0, -0.02, -0.02); body.material = metalMat; body.parent = gunRoot;
+
+      var barrel = BABYLON.MeshBuilder.CreateCylinder('barrel',{diameter:0.025,height:0.18,tessellation:12}, scene);
+      barrel.rotation.x = Math.PI/2;
+      barrel.position.set(0, -0.01, 0.11);
+      barrel.material = metalMat; barrel.parent = gunRoot;
+
+      var tipRing = BABYLON.MeshBuilder.CreateTorus('tipRing',{diameter:0.035,thickness:0.006,tessellation:16}, scene);
+      tipRing.rotation.x = Math.PI/2;
+      tipRing.position.set(0, -0.01, 0.20);
+      var tipMat = new BABYLON.StandardMaterial('tipMat', scene);
+      tipMat.emissiveColor = hexToColor3('#00ffcc');
+      tipMat.disableLighting = true;
+      tipRing.material = tipMat; tipRing.parent = gunRoot;
+
+      var guard = BABYLON.MeshBuilder.CreateBox('guard',{width:0.05,height:0.01,depth:0.04}, scene);
+      guard.position.set(0, -0.06, -0.05); guard.material = metalMat; guard.parent = gunRoot;
+
+      var tipGlow = BABYLON.MeshBuilder.CreateSphere('tipGlow',{diameter:0.012,segments:6}, scene);
+      tipGlow.position.set(0, -0.01, 0.21);
+      var glowMat = new BABYLON.StandardMaterial('glowMat', scene);
+      glowMat.emissiveColor = hexToColor3('#00ffcc');
+      glowMat.disableLighting = true;
+      tipGlow.material = glowMat; tipGlow.parent = gunRoot;
+
+      return { root: gunRoot, tip: tipGlow };
+    };
+
+    this.leftHand  = makeGlove('leftGlove');
+    this.rightHand = makeGlove('rightGlove');
+
+    var gunInfo = makeGun();
+    this.gun    = gunInfo.root;
+    this.gunTip = gunInfo.tip;
+
+    this.gun.parent = this.rightHand;
+    this.gun.position.set(0, -0.05, 0.08);
+
+    // 枪射线
+    var ray = BABYLON.MeshBuilder.CreateCylinder('aimRay',{
+      diameterTop:0.002, diameterBottom:0.006, height:10, tessellation:6,
+    }, scene);
+    ray.rotation.x = Math.PI/2;
+    ray.position.set(0, -0.01, 0.21 + 5);
+    var rayMat = new BABYLON.StandardMaterial('rayMat', scene);
+    rayMat.emissiveColor = hexToColor3('#00ffcc');
+    rayMat.alpha = 0.4;
+    rayMat.disableLighting = true;
+    ray.material = rayMat; ray.parent = this.gun;
+    this.aimRay = ray;
+
+    // 左手腕面板锚点
+    this.uiAnchor = new BABYLON.TransformNode('uiAnchor', scene);
+    this.uiAnchor.parent = this.leftHand;
+    this.uiAnchor.position.set(0.06, 0.08, 0);
+    this.uiAnchor.rotation.y = -0.3;
+  };
+
+  PlayerManager.prototype.update = function(deltaTime) {
+    // 射线跟随枪口通过 parent 已自动完成
+  };
+
+  return PlayerManager;
+})();
+
+// ================================================================
+// UIManager
+// ================================================================
+var UIManager = (function() {
+  function UIManager(scene, anchor) {
+    this.scene = scene;
+    this.anchor = anchor;
+    this._build();
+  }
+
+  UIManager.prototype._build = function() {
+    var scene = this.scene;
+    var anchor = this.anchor;
+
+    var panel = BABYLON.MeshBuilder.CreatePlane('wristPanel', {width:0.15,height:0.08}, scene);
+    panel.parent = anchor;
+    panel.position = BABYLON.Vector3.Zero();
+    panel.billboardMode = BABYLON.Mesh.BILLBOARDMODE_Y | BABYLON.Mesh.BILLBOARDMODE_ALL;
+
+    var borderMat = new BABYLON.StandardMaterial('borderMat', scene);
+    borderMat.emissiveColor = hexToColor3('#00ffcc');
+    borderMat.disableLighting = true;
+    var edges = [
+      {p:[0.075,0,0],  s:[0.002,0.08,0.002]},
+      {p:[-0.075,0,0], s:[0.002,0.08,0.002]},
+      {p:[0,0.04,0],   s:[0.15,0.002,0.002]},
+      {p:[0,-0.04,0],  s:[0.15,0.002,0.002]},
+    ];
+    edges.forEach(function(e,i) {
+      var b = BABYLON.MeshBuilder.CreateBox('border_'+i, {width:e.s[0],height:e.s[1],depth:e.s[2]}, scene);
+      b.position.set(e.p[0],e.p[1],e.p[2]); b.parent = anchor;
+      b.material = borderMat;
+    });
+
+    var ui = BABYLON.GUI.AdvancedDynamicTexture.CreateForMesh(panel, 512, 256, false);
+
+    var bg = new BABYLON.GUI.Rectangle('bg');
+    bg.width = '100%'; bg.height = '100%';
+    bg.background = 'rgba(0,10,20,0.7)';
+    bg.thickness = 0;
+    ui.addControl(bg);
+
+    // 心形
+    var heartCanvas = document.createElement('canvas');
+    heartCanvas.width=24; heartCanvas.height=22;
+    var hctx=heartCanvas.getContext('2d');
+    hctx.fillStyle='#ff4455';
+    hctx.beginPath();
+    var x=heartCanvas.width/2, y=heartCanvas.height/2;
+    hctx.moveTo(x, y+4);
+    hctx.bezierCurveTo(x,y, x-6,y-4, x-10,y+2);
+    hctx.bezierCurveTo(x-14,y+8, x-8,y+14, x,y+18);
+    hctx.bezierCurveTo(x+8,y+14, x+14,y+8, x+10,y+2);
+    hctx.bezierCurveTo(x+6,y-4, x,y, x,y+4);
+    hctx.fill();
+
+    var heart = new BABYLON.GUI.Image('heart', heartCanvas.toDataURL());
+    heart.width='24px'; heart.height='22px';
+    heart.horizontalAlignment = BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_LEFT;
+    heart.verticalAlignment   = BABYLON.GUI.Control.VERTICAL_ALIGNMENT_TOP;
+    heart.paddingLeft='8px'; heart.paddingTop='6px';
+    ui.addControl(heart);
+
+    this.healthText = new BABYLON.GUI.TextBlock('healthTxt','100');
+    this.healthText.color='#ff4455';
+    this.healthText.fontSize=20;
+    this.healthText.fontFamily='Courier New, monospace';
+    this.healthText.fontWeight='bold';
+    this.healthText.horizontalAlignment=BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_LEFT;
+    this.healthText.verticalAlignment=BABYLON.GUI.Control.VERTICAL_ALIGNMENT_TOP;
+    this.healthText.paddingLeft='36px'; this.healthText.paddingTop='4px';
+    ui.addControl(this.healthText);
+
+    var coin = new BABYLON.GUI.TextBlock('coinTxt','$');
+    coin.color='#ffcc00'; coin.fontSize=22;
+    coin.fontFamily='Courier New, monospace'; coin.fontWeight='bold';
+    coin.horizontalAlignment=BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_RIGHT;
+    coin.verticalAlignment=BABYLON.GUI.Control.VERTICAL_ALIGNMENT_TOP;
+    coin.paddingRight='8px'; coin.paddingTop='4px';
+    ui.addControl(coin);
+
+    this.scoreText = new BABYLON.GUI.TextBlock('scoreTxt','0');
+    this.scoreText.color='#ffcc00'; this.scoreText.fontSize=20;
+    this.scoreText.fontFamily='Courier New, monospace'; this.scoreText.fontWeight='bold';
+    this.scoreText.horizontalAlignment=BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_RIGHT;
+    this.scoreText.verticalAlignment=BABYLON.GUI.Control.VERTICAL_ALIGNMENT_TOP;
+    this.scoreText.paddingRight='38px'; this.scoreText.paddingTop='4px';
+    ui.addControl(this.scoreText);
+
+    var cdBg = new BABYLON.GUI.Ellipse('cdBg');
+    cdBg.width='36px'; cdBg.height='36px';
+    cdBg.color='#00ffcc'; cdBg.thickness=2;
+    cdBg.background='rgba(0,30,30,0.5)';
+    cdBg.horizontalAlignment=BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_CENTER;
+    cdBg.verticalAlignment=BABYLON.GUI.Control.VERTICAL_ALIGNMENT_BOTTOM;
+    cdBg.paddingBottom='6px';
+    ui.addControl(cdBg);
+    this.cooldownArc = cdBg;
+  };
+
+  UIManager.prototype.update = function(deltaTime) {};
+
+  return UIManager;
+})();
+
+// ================================================================
+// SceneManager
+// ================================================================
+var SceneManager = (function() {
+  function SceneManager() {
+    this.state = SCENE_STATE.IDLE;
+    this.engine = null;
+    this.scene  = null;
+    this.xrHelper = null;
+    this.envMgr   = null;
+    this.playerMgr = null;
+    this.uiMgr    = null;
+    this.lastTime = performance.now();
+  }
+
+  SceneManager.prototype.init = async function() {
+    addLog('Engine 初始化中...');
+    var canvas = document.getElementById('renderCanvas');
+
+    try {
+      this.engine = new BABYLON.Engine(canvas, true, {
+        preserveDrawingBuffer: true, stencil: true, antialias: true,
+      });
+    } catch(e) {
+      showDiag('[Engine 错误]\n' + e.message);
+      return;
+    }
+
+    this.scene = new BABYLON.Scene(this.engine);
+    this.scene.clearColor = new BABYLON.Color4(0.02, 0.03, 0.08, 1.0);
+    addLog('Scene 创建完成');
+
+    // 物理
+    try {
+      var cannonPlugin = new BABYLON.CannonJSPlugin(true, 10, CANNON);
+      this.scene.enablePhysics(BABYLON.Vector3.Zero(), cannonPlugin);
+      addLog('Cannon.js 物理启用');
+    } catch(e) {
+      addLog('物理引擎初始化失败: ' + e.message);
+    }
+
+    // 预览摄像机
+    var cam = new BABYLON.UniversalCamera('previewCam', new BABYLON.Vector3(0,1.6,-3), this.scene);
+    cam.setTarget(new BABYLON.Vector3(0,1.0,5));
+    cam.attachControl(canvas, true);
+    cam.minZ = 0.01;
+    addLog('摄像机就绪');
+
+    // 环境
+    this.envMgr = new EnvironmentManager(this.scene);
+    addLog('环境创建完成');
+
+    // WebXR
+    await this._initXR();
+
+    // 玩家
+    this.playerMgr = new PlayerManager(this.scene, this.xrHelper);
+    addLog('玩家管理器就绪');
+
+    // UI
+    if (this.xrHelper && this.playerMgr) {
+      this.uiMgr = new UIManager(this.scene, this.playerMgr.uiAnchor);
+      addLog('UI 管理器就绪');
+    }
+
+    // 渲染循环
+    var self = this;
+    this.engine.runRenderLoop(function() {
+      var now = performance.now();
+      var dt  = Math.min((now - self.lastTime) / 1000, 0.05);
+      self.lastTime = now;
+      self._update(dt);
+      self.scene.render();
+    });
+    window.addEventListener('resize', function() { self.engine.resize(); });
+    addLog('渲染循环启动');
+  };
+
+  SceneManager.prototype._initXR = async function() {
+    var self = this;
+    var btn = document.getElementById('startBtn');
+
+    // 按钮调试：每次点击都写日志
+    btn.addEventListener('pointerdown', function() { addLog('[点击] 按钮 pointerdown 触发'); });
+    btn.addEventListener('click', function() { addLog('[点击] 按钮 click 触发'); });
+
+    btn.addEventListener('click', async function() {
+      addLog('[点击] 处理开始');
+      if (!self.xrHelper) {
+        showDiag('[错误]\nxrHelper 未初始化\n\n请刷新页面重试');
+        setStatus('[错误] xrHelper 未初始化');
+        return;
+      }
+      var base = self.xrHelper.baseExperience;
+      addLog('[DEBUG] baseExperience=' + (base ? '存在' : '不存在/null'));
+      if (!base) {
+        showDiag('[错误]\nbaseExperience 不存在\n\nPICO 浏览器设置中\n请开启 WebXR 实验功能');
+        setStatus('[错误] baseExperience 不存在');
+        return;
+      }
+      setStatus('检查 VR 支持...');
+      var supported = false;
+      try {
+        supported = await base.isSessionSupportedAsync('immersive-vr');
+        addLog('[DEBUG] isSessionSupported=' + supported);
+      } catch(e) {
+        showDiag('[错误]\nisSessionSupportedAsync 异常:\n' + e.message);
+        return;
+      }
+      if (!supported) {
+        showDiag('[错误]\nimmersive-vr 不支持\n\n请在 PICO 浏览器\n设置中开启 WebXR');
+        setStatus('[错误] immersive-vr 不支持');
+        return;
+      }
+      setStatus('正在进入 VR...');
+      try {
+        await base.enterXRAsync('immersive-vr', 'local-floor');
+        setStatus('已进入 VR!');
+      } catch(e) {
+        showDiag('[错误]\n进入 VR 失败:\n' + e.message);
+        setStatus('[错误] 进入失败: ' + e.message);
+      }
+    });
+
+    // 创建 XR 体验
+    try {
+      setStatus('正在初始化 WebXR...');
+      addLog('调用 createDefaultXRExperienceAsync...');
+      var xr = await this.scene.createDefaultXRExperienceAsync({
+        floorMeshes: [],
+        disableTeleportation: true,
+        optionalFeatures: true,
+      });
+      this.xrHelper = xr;
+      addLog('createDefaultXRExperienceAsync 完成');
+      addLog('[DEBUG] xrHelper=' + (xr ? '存在' : 'null'));
+      addLog('[DEBUG] baseExperience=' + (xr.baseExperience ? '存在' : '不存在/null'));
+      addLog('[DEBUG] input=' + (xr.input ? '存在' : '不存在/null'));
+
+      if (!xr.baseExperience) {
+        showDiag('[警告]\nbaseExperience 为 undefined\n\n请在 PICO 浏览器设置中\n开启 WebXR 实验功能');
+        setStatus('[警告] baseExperience 为 undefined');
+        btn.textContent = 'WEBXR 未就绪';
+      } else {
+        setStatus('WebXR Ready - 点击 ENTER VR');
+
+        // 手柄绑定
+        var bindController = function(source) {
+          source.onMotionControllerInitObservable.addOnce(function(mc) {
+            var hand = mc.handedness;
+            addLog('[手柄] ' + hand + ' 已连接');
+            if (self.playerMgr) {
+              var root = source.grip || source.pointer;
+              if (root) {
+                if (hand === 'right') self.playerMgr.rightHand.parent = root;
+                else if (hand === 'left')  self.playerMgr.leftHand.parent  = root;
+              }
+            }
+          });
+        };
+        xr.input.onControllerAddedObservable.add(bindController);
+        xr.input.controllers.forEach(bindController);
+        xr.input.onControllerRemovedObservable.add(function() {
+          addLog('[手柄] 已断开');
+        });
+
+        // XR 状态变化
+        xr.baseExperience.onStateChangedObservable.add(function(state) {
+          if (state === BABYLON.WebXRState.IN_XR) {
+            setStatus('VR 已进入!');
+            document.getElementById('overlay').style.display = 'none';
+          } else if (state === BABYLON.WebXRState.NOT_IN_XR) {
+            setStatus('已退出 VR');
+            document.getElementById('overlay').style.display = 'flex';
+          }
+        });
+      }
+    } catch(e) {
+      showDiag('[错误]\nWebXR 初始化失败:\n' + e.message);
+      setStatus('[错误] WebXR 不可用');
+      btn.textContent = 'WEBXR 不可用';
+      btn.disabled = true;
+    }
+  };
+
+  SceneManager.prototype._update = function(dt) {
+    if (this.envMgr)   this.envMgr.update(dt);
+    if (this.playerMgr) this.playerMgr.update(dt);
+    if (this.uiMgr)    this.uiMgr.update(dt);
+  };
+
+  SceneManager.prototype.setState = function(newState) {
+    var prev = this.state;
+    this.state = newState;
+    addLog('[状态机] ' + prev + ' -> ' + newState);
+    if (newState === SCENE_STATE.STATIC_DEMO && this.envMgr) {
+      this.envMgr.setPillarColor('#00ff00', 0.8);
+    }
+  };
+
+  return SceneManager;
+})();
+
+// ================================================================
+// Main Entry
+// ================================================================
+window.addEventListener('DOMContentLoaded', async function() {
+  addLog('页面加载完成');
+
+  if (typeof BABYLON === 'undefined') {
+    showDiag('[致命错误]\nBabylon.js 未加载!\n\n可能原因:\n1. CDN 无法访问\n2. 网络被屏蔽\n\n请确认 PICO 浏览器\n可以访问外网');
+    return;
+  }
+  addLog('Babylon.js 已加载, 版本: ' + (BABYLON.Engine.Version || 'unknown'));
+
+  var mgr = new SceneManager();
+  window._mgr = mgr;
+
+  try {
+    await mgr.init();
+    mgr.setState(SCENE_STATE.STATIC_DEMO);
+    addLog('SceneManager 初始化完成');
+    setStatus('就绪 - 点击 ENTER VR 进入');
+  } catch(e) {
+    showDiag('[致命错误]\n初始化失败:\n' + e.message);
+  }
+});
+
+// 全局调试接口
+window._testSetColor = function(hex) {
+  if (window._mgr && window._mgr.envMgr) {
+    window._mgr.envMgr.setPillarColor(hex, 1.0);
+    addLog('测试变色: ' + hex);
+  }
+};
+</script>
+</body>
+</html>
